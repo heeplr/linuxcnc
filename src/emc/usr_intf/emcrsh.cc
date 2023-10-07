@@ -569,17 +569,21 @@ static int commandHello(connectionRecType *context)
   if (!s) return -1;
   if (strcmp(s, pwd) != 0) return -1;
 
-  // get announced client name
-  s = strtok(NULL, delims);
-  if (!s) return -1;
-  if(rtapi_strlcpy(context->hostName, s, sizeof(context->hostName)) >= sizeof(context->hostName)) {
+  pch = strtok(NULL, delims);
+  if (pch == NULL) return -1;
+  if (strcmp(pch, pwd) != 0) return -1;
+
+  pch = strtok(NULL, delims);
+  if (pch == NULL) return -1;
+  strncpy(context->hostName, pch, sizeof(context->hostName));
+  if (context->hostName[sizeof(context->hostName)-1] != '\0') {
     return -1;
   }
 
-  // get version string
-  s = strtok(NULL, delims);
-  if (!s) return -1;
-  if(rtapi_strlcpy(context->version, s, sizeof(context->version)) >= sizeof(context->version)) {
+  pch = strtok(NULL, delims);
+  if (pch == NULL) return -1;
+  strncpy(context->version, pch, sizeof(context->version));
+  if (context->version[sizeof(context->version)-1] != '\0') {
     return -1;
   }
 
@@ -718,8 +722,7 @@ static cmdResponseType setEnable(connectionRecType *context)
 
 static cmdResponseType setConfig(connectionRecType *context)
 {
-  OUT("SET CONFIG not implemented");
-  return rtCustomError;
+  return rtNoError;
 }
 
 static cmdResponseType setCommMode(connectionRecType *context)
