@@ -569,20 +569,16 @@ static int commandHello(connectionRecType *context)
   if (!s) return -1;
   if (strcmp(s, pwd) != 0) return -1;
 
-  pch = strtok(NULL, delims);
-  if (pch == NULL) return -1;
-  if (strcmp(pch, pwd) != 0) return -1;
-
-  pch = strtok(NULL, delims);
-  if (pch == NULL) return -1;
-  strncpy(context->hostName, pch, sizeof(context->hostName));
+  s = strtok(NULL, delims);
+  if (s == NULL) return -1;
+  strncpy(context->hostName, s, sizeof(context->hostName)-1);
   if (context->hostName[sizeof(context->hostName)-1] != '\0') {
     return -1;
   }
 
-  pch = strtok(NULL, delims);
-  if (pch == NULL) return -1;
-  strncpy(context->version, pch, sizeof(context->version));
+  s = strtok(NULL, delims);
+  if (s == NULL) return -1;
+  strncpy(context->version, s, sizeof(context->version)-1);
   if (context->version[sizeof(context->version)-1] != '\0') {
     return -1;
   }
