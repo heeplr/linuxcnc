@@ -66,6 +66,9 @@ function testGet() {
     # check default global settings
     echo get plat
 
+    # check default global settings
+    echo get plat
+
     # test commands failing for machine not running
     testSet mode mdi
 
