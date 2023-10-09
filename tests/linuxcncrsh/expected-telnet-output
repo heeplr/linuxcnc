@@ -21,7 +21,8 @@ ERROR OK
 UPDATE AUTO
 ERROR OK
 PLAT Linux
-MODE MANUAL
+GET_UPDATE AUTO
+INIFILE /__w/linuxcnc/linuxcnc/tests/linuxcncrsh/linuxcncrsh-test.ini
 SET MODE NAK
 MODE MANUAL
 ERROR OK
