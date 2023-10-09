@@ -104,6 +104,7 @@ function testGet() {
     testSet mode manual
 
     # prepare machine
+    echo get estop
     echo set estop off
     echo get estop
 
