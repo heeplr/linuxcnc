@@ -100,6 +100,7 @@ function testGet() {
     testSet probe_clear
     testSet mode manual
 
+    # prepare machine
     echo set estop off
     echo get estop
 
