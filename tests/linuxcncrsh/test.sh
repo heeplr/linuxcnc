@@ -99,7 +99,6 @@ function testGet() {
 
     # test probing in manual mode
     testSet mode mdi
-    testGet pos_offset
     testGet probe_tripped
     testGet probe_value
     testGet probe_clear
@@ -111,6 +110,7 @@ function testGet() {
     testSet probe_clear
 
     # do homing
+    testSet mode manual
     testSet home 0                         # <Axis No>
     testSet home 1
     testSet home 2
@@ -119,6 +119,7 @@ function testGet() {
     testSet home 5
 
     # test probing
+    testSet mode mdi
     testSet probe 0 0 0                    # <x> <y> <z>
     testSet probe_clear
     testSet mode manual
@@ -180,6 +181,7 @@ function testGet() {
     testGet operator_text
     testGet optional_stop
     testGet override_limits
+    testGet pos_offset
     testGet program
     testGet program_angular_units
     testGet program_codes
