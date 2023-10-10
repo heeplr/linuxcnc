@@ -47,10 +47,36 @@ function testGet() {
     echo "get $@"
     echo "get error"
 }
+# test set command by
+# - getting the key's old value before setting
+# - setting the new value
+# - getting the new value
+# - collect possible error from linuxcncsvr
+function testSet() {
+    # get before value
+    echo "get $1"
+    # set cmd
+    echo "set $@"
+    # get after value
+    echo "get $1"
+    # get error from server (or OK)
+    echo "get error"
+}
+
+# get command with collecting possible error from linuxcncsvr
+function testGet() {
+    cmd="$@"
+    echo "get $@"
+    echo "get error"
+}
 
 (
     # initialize
     echo hello EMC mt 1.0
+    testSet enable EMCTOO
+    testGet debug
+    testSet verbose on
+    testSet echo off
     testSet enable EMCTOO
     testGet debug
     testSet verbose on
@@ -62,12 +88,6 @@ function testGet() {
     # check default global settings
     testGet plat
     testGet update
-
-    # check default global settings
-    echo get plat
-
-    # check default global settings
-    echo get plat
 
     # test commands failing for machine not running
     testSet mode mdi
@@ -103,42 +123,11 @@ function testGet() {
     testSet probe_clear
     testSet mode manual
 
-    # prepare machine
-    echo get estop
-    echo set estop off
-    echo get estop
-
-    # prepare machine
-    testSet estop off
-    testSet machine on
-    testSet mode manual
-
-    # test probing in manual mode
-    testSet mode mdi
-    testGet probe_tripped
-    testGet probe_value
-    testGet probe_clear
-
-    # test probing before homing
-    testSet probe 0 0 0                    # <x> <y> <z>
-    testSet probe_clear
-
-    # do homing
-    testSet mode manual
-    testSet home 0                         # <Axis No>
-    testSet home 1
-    testSet home 2
-    testSet home 3
-    testSet home 4
-    testSet home 5
-
-    # test probing
-    testSet mode mdi
-    testSet probe 0 0 0                    # <x> <y> <z>
-    testSet probe_clear
-    testSet mode manual
-
     # test spindle command
+    testSet spindle forward                # turn on all w/o param
+    testSet spindle off -1                 # turn off all w/param
+    testGet spindle -1                     # check all w/param
+    testSet spindle forward 99             # turn on illegal spindle
     testSet spindle forward                # turn on all w/o param
     testSet spindle off -1                 # turn off all w/param
     testGet spindle -1                     # check all w/param
@@ -151,11 +140,12 @@ function testGet() {
     testSet brake forward 99               # turn on illegal spindle
 
     # test pause
-    testSet wait_mode received             # otherwise pause will stall
+    testSet set_wait received             # otherwise pause will stall
     testSet pause
-    testSet wait_mode done
+    testSet set_wait done
     testSet resume
 
+    # test g-code
     # test g-code
     echo set mode mdi
     echo set mdi m100 p-1 q-2
@@ -199,7 +189,7 @@ function testGet() {
     testGet program_units
     testGet rel_act_pos
     testGet rel_cmd_pos
-    testGet wait_mode
+    testGet set_wait
     testGet teleop_enable
     testGet timeout
     testGet tool
@@ -225,6 +215,7 @@ function testGet() {
     testSet optional_stop 1                # <none | 0 | 1>
     testSet override_limits off            # <On | Off>
     #testSet run <Line No>
+    testSet setWait 1                      # <Time>
     testSet step
     testSet task_plan_init
     testSet teleop_enable
