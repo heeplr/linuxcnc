@@ -83,7 +83,7 @@ function testGet() {
     testSet echo off
     # ask linuxcncrsh to not read the next command until it's done running
     # the current one
-    testSet set_wait done
+    testSet wait_mode done
 
     # check default global settings
     testGet plat
@@ -141,9 +141,9 @@ function testGet() {
     testSet brake forward 99               # turn on illegal spindle
 
     # test pause
-    testSet set_wait received             # otherwise pause will stall
+    testSet wait_mode received             # otherwise pause will stall
     testSet pause
-    testSet set_wait done
+    testSet wait_mode done
     testSet resume
 
     # test g-code
@@ -191,7 +191,7 @@ function testGet() {
     testGet program_units
     testGet rel_act_pos
     testGet rel_cmd_pos
-    testGet set_wait
+    testGet wait_mode
     testGet teleop_enable
     testGet timeout
     testGet tool
