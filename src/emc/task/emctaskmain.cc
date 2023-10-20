@@ -3118,6 +3118,7 @@ static int iniLoad(const char *filename)
 	}
     }
 
+
     if (NULL != (inistring = inifile.Find("MACHINE", "EMC"))) {
 	strncpy(machine, inistring, LINELEN-1);
     } else {
