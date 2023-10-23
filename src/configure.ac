@@ -490,7 +490,7 @@ install with "sudo apt-get install libmodbus-dev" or disable with
     ],
     [
 	# disable libmodbus related tests
-	find "$srcdir/../tests/mb2hal" -mindepth 1 -maxdepth 1 -type d -exec touch {}/skip \;
+	find "$srcdir/../tests/mb2hal" -mindepth 1 -maxdepth 1 -type d -exec touch "{}/skip" \;
     ]
 )
 
