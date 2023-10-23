@@ -479,12 +479,18 @@ AS_IF(
                 [define if the libmodbus3 headers and library are available]
             )
             AC_SUBST(HAVE_LIBMODBUS3, yes)
+            # re-enable modbus related tests that might have been disabled by previous configure run
+            find "$srcdir/../tests/mb2hal" -name skip -delete
         else
           AC_MSG_RESULT(no)
           AC_MSG_ERROR([libmodbus3 not found!
 install with "sudo apt-get install libmodbus-dev" or disable with
 "configure --without-libmodbus"])
         fi
+    ],
+    [
+	# disable libmodbus related tests
+	find "$srcdir/../tests/mb2hal" -mindepth 1 -maxdepth 1 -type d -exec touch {}/skip \;
     ]
 )
 
