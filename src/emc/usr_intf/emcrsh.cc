@@ -569,17 +569,17 @@ static int commandHello(connectionRecType *context)
   if (!s) return -1;
   if (strcmp(s, pwd) != 0) return -1;
 
+  // get announced client name
   s = strtok(NULL, delims);
   if (s == NULL) return -1;
-  strncpy(context->hostName, s, sizeof(context->hostName)-1);
-  if (context->hostName[sizeof(context->hostName)-1] != '\0') {
+  if(rtapi_strlcpy(context->hostName, s, sizeof(context->hostName)) >= sizeof(context->hostName)) {
     return -1;
   }
 
+  // get version string
   s = strtok(NULL, delims);
   if (s == NULL) return -1;
-  strncpy(context->version, s, sizeof(context->version)-1);
-  if (context->version[sizeof(context->version)-1] != '\0') {
+  if(rtapi_strlcpy(context->version, s, sizeof(context->version)) >= sizeof(context->version)) {
     return -1;
   }
 
