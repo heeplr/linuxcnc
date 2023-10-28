@@ -102,8 +102,6 @@ function testGet() {
     testGet probe_tripped
     testGet probe_value
     testGet probe_clear
-    testSet probe 0 0 0                    # <x> <y> <z>
-    testSet probe_clear
 
     # test probing before homing
     testSet probe 0 0 0                    # <x> <y> <z>
