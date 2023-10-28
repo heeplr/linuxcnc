@@ -1743,7 +1743,7 @@ void EMC_TRAJ_STAT::update(CMS * cms)
     cms->update(probeval);
     cms->update(kinematics_type);
     cms->update(motion_type);
-
+    cms->update(spindles);
 }
 
 /*
@@ -1851,9 +1851,6 @@ void EMC_MOTION_STAT::update(CMS * cms)
     for (int i_joint = 0; i_joint < EMCMOT_MAX_JOINTS; i_joint++)
 	joint[i_joint].update(cms);
     cms->update(debug);
-
-    // spindle.update(cms); //FIXME - is this needed ? Let's see. andypugh 13/6/16
-
 }
 
 /*
