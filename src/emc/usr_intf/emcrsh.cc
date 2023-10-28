@@ -571,14 +571,14 @@ static int commandHello(connectionRecType *context)
 
   // get announced client name
   s = strtok(NULL, delims);
-  if (s == NULL) return -1;
+  if (!s) return -1;
   if(rtapi_strlcpy(context->hostName, s, sizeof(context->hostName)) >= sizeof(context->hostName)) {
     return -1;
   }
 
   // get version string
   s = strtok(NULL, delims);
-  if (s == NULL) return -1;
+  if (!s) return -1;
   if(rtapi_strlcpy(context->version, s, sizeof(context->version)) >= sizeof(context->version)) {
     return -1;
   }
