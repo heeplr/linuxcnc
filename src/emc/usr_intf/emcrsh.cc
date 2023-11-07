@@ -1626,13 +1626,13 @@ static cmdResponseType getEStop(connectionRecType *context)
 }
 
 static cmdResponseType getTimeout(connectionRecType *context)
-{
+{  
   OUT("TIMEOUT %f", emcTimeout);
   return rtNoError;
 }
 
 static cmdResponseType getTime(connectionRecType *context)
-{
+{  
   OUT("TIME %f", etime());
   return rtNoError;
 }
@@ -1834,7 +1834,7 @@ static cmdResponseType getBrake(connectionRecType *context)
 }
 
 static cmdResponseType getTool(connectionRecType *context)
-{
+{  
   OUT("TOOL %d", emcStatus->io.tool.toolInSpindle);
   return rtNoError; 
 }
