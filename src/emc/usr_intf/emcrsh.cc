@@ -718,7 +718,8 @@ static cmdResponseType setEnable(connectionRecType *context)
 
 static cmdResponseType setConfig(connectionRecType *context)
 {
-  return rtNoError;
+  OUT("SET CONFIG not implemented");
+  return rtCustomError;
 }
 
 static cmdResponseType setCommMode(connectionRecType *context)
