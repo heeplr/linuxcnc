@@ -14,21 +14,29 @@
 * Last change:
 ********************************************************************/
 
+#include <asm-generic/socket.h>
+#include <cstddef>
+#include <cstdlib>
+#include <stdlib.h>
+#include <unistd.h>
 #define _REENTRANT
 
 #include <stdio.h>
 #include <string.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <getopt.h>
 
-#include "emcglb.h"		// EMC_NMLFILE, TRAJ_MAX_VELOCITY, etc.
-#include "inifile.hh"		// INIFILE
+#include "libcli/libcli.h"
+#include "emcglb.h"         // EMC_NMLFILE, TRAJ_MAX_VELOCITY, etc.
+#include "inifile.hh"		    // INIFILE
 #include "rcs_print.hh"
-#include "timer.hh"             // etime()
-#include "shcom.hh"             // NML Messaging functions
+#include "timer.hh"         // etime()
+#include "shcom.hh"         // NML Messaging functions
 #include <rtapi_string.h>
+#include "emcsh_commands.h" // shell_commands[]
 
 /*
   Using linuxcncrsh:
@@ -42,8 +50,6 @@
   With -- --name <server name> Sets the server name to specified name for Hello.
   With -- --connectpw <password> Sets the connection password to 'password'. Default EMC
   With -- --enablepw <password> Sets the enable password to 'password'. Default EMCTOO
-  With -- --sessions <max sessions> Sets the maximum number of simultaneous connextions
-            to max sessions. Default is no limit (-1).
   With -- --path Sets the base path to program (G-Code) files, default is "../../nc_files/".
             Make sure to include the final slash (/).
   With -- -ini <INI file>, uses specified INI file instead of default emc.ini. 
@@ -55,18 +61,7 @@
   
   The supported commands are as follows:
   
-  ==> HELLO <==
   
-  Hello <password> <client> <version>
-  If a valid password was entered the server will respond with
-  
-  HELLO ACK <Server Name> <Server Version>
-  
-  Where server name and server version are looked up from the implementation.
-  if an invalid password or any other syntax error occurs then the server 
-  responds with:
-  
-  HELLO NAK
   
   ==> Get <==
   
@@ -398,7 +393,8 @@
   4> Get shutdown to notify LinuxCNC to actually shutdown.
 */
 
-// EMC_STAT *emcStatus;
+// maximum amount of connected clients
+#define MAX_SESSIONS 255
 
 typedef enum {
   cmdHello, cmdSet, cmdGet, cmdQuit, cmdShutdown, cmdHelp, cmdUnknown} cmdType;
@@ -423,8 +419,8 @@ typedef enum {
   rtNoError, rtHandledNoError, rtStandardError, rtCustomError, rtCustomHandledError
   } cmdResponseType;
   
-typedef struct {  
-  int cliSock;
+typedef struct {
+  int sockfd;           // socket for our telnet client connection
   char hostName[80];
   char version[8];
   bool linked;
@@ -435,14 +431,11 @@ typedef struct {
   int commProt;
   char inBuf[256];
   char outBuf[4096];
-  char progName[PATH_MAX];} connectionRecType;
+  char progName[PATH_MAX];
+} sessionContext;
 
-int port = 5007;
-int server_sockfd;
-socklen_t server_len, client_len;
-struct sockaddr_in server_address;
-struct sockaddr_in client_address;
-bool useSockets = true;
+bool shutdown_server = false;  // true if accept() loop should stop taking telnet connections
+int port = 5007;        // default port to listen for telnet connections
 int tokenIdx;
 const char *delims = " \n\r\0";
 int enabledConn = -1;
@@ -450,7 +443,7 @@ char pwd[16] = "EMC\0";
 char enablePWD[16] = "EMCTOO\0";
 char serverName[24] = "EMCNETSVR\0";
 int sessions = 0;
-int maxSessions = -1;
+pthread_t threads[MAX_SESSIONS];      // thread id's for each sessions' thread
 
 const char *cmdTokens[] = {
   "ECHO", "VERBOSE", "ENABLE", "CONFIG", "COMM_MODE", "COMM_PROT", "INIFILE", "PLAT", "INI", "DEBUG",
@@ -469,89 +462,9 @@ const char *cmdTokens[] = {
 
 const char *commands[] = {"HELLO", "SET", "GET", "QUIT", "SHUTDOWN", "HELP", ""};
 
-struct option longopts[] = {
-  {"help", 0, NULL, 'h'},
-  {"port", 1, NULL, 'p'},
-  {"name", 1, NULL, 'n'},
-  {"sessions", 1, NULL, 's'},
-  {"connectpw", 1, NULL, 'w'},
-  {"enablepw", 1, NULL, 'e'},
-  {"path", 1, NULL, 'd'},
-  {0,0,0,0}};
-
-/* format string to outputbuffer (will be presented to user as result of command) */
+// format string to outputbuffer (will be presented to user as result of command)
 #define OUT(...) snprintf(context->outBuf, sizeof(context->outBuf), __VA_ARGS__)
 
-
-static void thisQuit()
-{
-    EMC_NULL emc_null_msg;
-
-    if (emcStatusBuffer != 0) {
-	// wait until current message has been received
-	emcCommandWaitReceived();
-    }
-
-    // clean up NML buffers
-
-    if (emcErrorBuffer != 0) {
-	delete emcErrorBuffer;
-	emcErrorBuffer = 0;
-    }
-
-    if (emcStatusBuffer != 0) {
-	delete emcStatusBuffer;
-	emcStatusBuffer = 0;
-	emcStatus = 0;
-    }
-
-    if (emcCommandBuffer != 0) {
-	delete emcCommandBuffer;
-	emcCommandBuffer = 0;
-    }
-
-    exit(0);
-}
-
-static int initSocket()
-{
-  int optval = 1;
-  int err;
-  
-  server_sockfd = socket(AF_INET, SOCK_STREAM, 0);
-  setsockopt(server_sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-  server_address.sin_family = AF_INET;
-  server_address.sin_addr.s_addr = htonl(INADDR_ANY);
-  server_address.sin_port = htons(port);
-  server_len = sizeof(server_address);
-  err = bind(server_sockfd, (struct sockaddr *)&server_address, server_len);
-  if (err) {
-      rcs_print_error("error initializing sockets: %s\n", strerror(errno));
-      return err;
-  }
-
-  err = listen(server_sockfd, 5);
-  if (err) {
-      rcs_print_error("error listening on socket: %s\n", strerror(errno));
-      return err;
-  }
-  
-  // ignore SIGCHLD
-  {
-    struct sigaction act;
-    act.sa_handler = SIG_IGN;
-    sigemptyset(&act.sa_mask);
-    act.sa_flags = 0;
-    sigaction(SIGCHLD, &act, NULL);
-  }
-
-  return 0;
-}
-
-static void sigQuit(int sig)
-{
-    thisQuit();
-}
 
 static cmdTokenType lookupCommandToken(char *s)
 {
@@ -562,7 +475,7 @@ static cmdTokenType lookupCommandToken(char *s)
 }
 
 // initiate session
-static int commandHello(connectionRecType *context)
+static int commandHello(sessionContext *context)
 {
   // get password token
   char *s = strtok(NULL, delims);
@@ -674,7 +587,7 @@ static int checkAngularConversionStr(char *s)
   return -1;
 }
 
-static cmdResponseType setEcho(connectionRecType *context)
+static cmdResponseType setEcho(sessionContext *context)
 {
    
    char *s = strtok(NULL, delims);
@@ -686,7 +599,7 @@ static cmdResponseType setEcho(connectionRecType *context)
    return rtNoError;
 }
 
-static cmdResponseType setVerbose(connectionRecType *context)
+static cmdResponseType setVerbose(sessionContext *context)
 {
    
    char *s = strtok(NULL, delims);
@@ -698,12 +611,12 @@ static cmdResponseType setVerbose(connectionRecType *context)
    return rtNoError;
 }
 
-static cmdResponseType setEnable(connectionRecType *context)
+static cmdResponseType setEnable(sessionContext *context)
 {
   
    char *s = strtok(NULL, delims);
    if (s && (strcmp(s, enablePWD) == 0) ) {
-     enabledConn = context->cliSock;
+     enabledConn = context->sockfd;
      context->enabled = true;
      return rtNoError;
      }
@@ -716,13 +629,13 @@ static cmdResponseType setEnable(connectionRecType *context)
      else return rtStandardError;
 }
 
-static cmdResponseType setConfig(connectionRecType *context)
+static cmdResponseType setConfig(sessionContext *context)
 {
   OUT("SET CONFIG not implemented");
   return rtCustomError;
 }
 
-static cmdResponseType setCommMode(connectionRecType *context)
+static cmdResponseType setCommMode(sessionContext *context)
 {
   int ret;
   
@@ -733,7 +646,7 @@ static cmdResponseType setCommMode(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType setCommProt(connectionRecType *context)
+static cmdResponseType setCommProt(sessionContext *context)
 {
   char *pVersion = strtok(NULL, delims);
   if (!pVersion) return rtStandardError;
@@ -741,7 +654,7 @@ static cmdResponseType setCommProt(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType setDebug(connectionRecType *context)
+static cmdResponseType setDebug(sessionContext *context)
 {
   char *pLevel;
   int level;
@@ -755,28 +668,28 @@ static cmdResponseType setDebug(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType setWaitMode(connectionRecType *context)
+static cmdResponseType setWaitMode(sessionContext *context)
 {
-  char *s = strtok(NULL, delims);
-  switch (checkReceivedDoneNone(s)) {
-    case -1: return rtStandardError;
-    case 0: {
-      emcWaitType = EMC_WAIT_RECEIVED;
-      break;
-    }
-    case 1: {
-      emcWaitType = EMC_WAIT_DONE;
-      break;
-    }
-    case 2: {
-      OUT("linuxcncrsh: 'set wait_mode' asked for 'NONE', but that setting has been removed as it may cause commands to be lost");
-      return rtCustomError;
-    }
-  }
-  return rtNoError;
+   char *s = strtok(NULL, delims);
+   switch (checkReceivedDoneNone(s)) {
+     case -1: return rtStandardError;
+     case 0: {
+       emcWaitType = EMC_WAIT_RECEIVED;
+       break;
+     }
+     case 1: {
+       emcWaitType = EMC_WAIT_DONE;
+       break;
+     }
+     case 2: {
+       OUT("linuxcncrsh: 'set wait_mode' asked for 'NONE', but that setting has been removed as it may cause commands to be lost");
+       return rtCustomError;
+     }
+   }
+   return rtNoError;
 }
 
-static cmdResponseType setMachine(connectionRecType *context)
+static cmdResponseType setMachine(sessionContext *context)
 {
    char *s = strtok(NULL, delims);
    switch (checkOnOff(s)) {
@@ -791,7 +704,7 @@ static cmdResponseType setMachine(connectionRecType *context)
    return rtNoError;
 }
 
-static cmdResponseType setEStop(connectionRecType *context)
+static cmdResponseType setEStop(sessionContext *context)
 {
     char *state = strtok(NULL, delims);
     switch (checkOnOff(state)) {
@@ -810,7 +723,7 @@ static cmdResponseType setEStop(connectionRecType *context)
     return rtNoError;
 }
 
-static cmdResponseType setWait(connectionRecType *context)
+static cmdResponseType setWait(sessionContext *context)
 {
   char *s = strtok(NULL, delims);
   switch (checkReceivedDoneNone(s)) {
@@ -827,7 +740,7 @@ static cmdResponseType setWait(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType setTimeout(connectionRecType *context)
+static cmdResponseType setTimeout(sessionContext *context)
 {
   float Timeout;
   
@@ -838,7 +751,7 @@ static cmdResponseType setTimeout(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType setUpdate(connectionRecType *context)
+static cmdResponseType setUpdate(sessionContext *context)
 {
   char *s = strtok(NULL, delims);
   switch (checkNoneAuto(s)) {
@@ -849,7 +762,7 @@ static cmdResponseType setUpdate(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType setMode(connectionRecType *context)
+static cmdResponseType setMode(sessionContext *context)
 {
   char *s = strtok(NULL, delims);
   switch (checkManualAutoMDI(s)) {
@@ -867,7 +780,7 @@ static cmdResponseType setMode(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType setMist(connectionRecType *context)
+static cmdResponseType setMist(sessionContext *context)
 {
    char *s = strtok(NULL, delims);
    switch (checkOnOff(s)) {
@@ -882,7 +795,7 @@ static cmdResponseType setMist(connectionRecType *context)
    return rtNoError;
 }
 
-static cmdResponseType setFlood(connectionRecType *context)
+static cmdResponseType setFlood(sessionContext *context)
 {
    char *s = strtok(NULL, delims);
    switch (checkOnOff(s)) {
@@ -897,7 +810,7 @@ static cmdResponseType setFlood(connectionRecType *context)
    return rtNoError;
 }
 
-static cmdResponseType setSpindle(connectionRecType *context)
+static cmdResponseType setSpindle(sessionContext *context)
 {
     // handle no spindle present
     if (emcStatus->motion.traj.spindles == 0) {
@@ -970,7 +883,7 @@ static cmdResponseType setSpindle(connectionRecType *context)
 	return rtNoError;
 }
 
-static cmdResponseType setBrake(connectionRecType *context)
+static cmdResponseType setBrake(sessionContext *context)
 {
     // handle no spindle present
     if (emcStatus->motion.traj.spindles == 0) {
@@ -1023,7 +936,7 @@ static cmdResponseType setBrake(connectionRecType *context)
     return rtNoError;
 }
 
-static cmdResponseType setLoadToolTable(connectionRecType *context)
+static cmdResponseType setLoadToolTable(sessionContext *context)
 {
   char *s = strtok(NULL, delims);
   if (!s) return rtStandardError;
@@ -1031,7 +944,7 @@ static cmdResponseType setLoadToolTable(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType setToolOffset(connectionRecType *context)
+static cmdResponseType setToolOffset(sessionContext *context)
 {
   int tool;
   float length, diameter;
@@ -1050,7 +963,7 @@ static cmdResponseType setToolOffset(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType setOverrideLimits(connectionRecType *context)
+static cmdResponseType setOverrideLimits(sessionContext *context)
 {
    char *s = strtok(NULL, delims); 
    switch (checkOnOff(s)) {
@@ -1061,14 +974,14 @@ static cmdResponseType setOverrideLimits(connectionRecType *context)
    return rtNoError;
 }
 
-static cmdResponseType setMDI(connectionRecType *context)
+static cmdResponseType setMDI(sessionContext *context)
 {
   char *s = strtok(NULL, "\n\r\0");
   if (sendMdiCmd(s) !=0) return rtStandardError;
   return rtNoError;
 }
 
-static cmdResponseType setHome(connectionRecType *context)
+static cmdResponseType setHome(sessionContext *context)
 {
   int joint;
   
@@ -1103,7 +1016,7 @@ static int axisnumber(char *s) {
   return axis;
 }
 
-static cmdResponseType setJogStop(connectionRecType *context)
+static cmdResponseType setJogStop(sessionContext *context)
 {
   int ja,jnum,jjogmode;
   char aletter;
@@ -1130,7 +1043,7 @@ static cmdResponseType setJogStop(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType setJog(connectionRecType *context)
+static cmdResponseType setJog(sessionContext *context)
 {
   int ja,jnum,jjogmode;
   char aletter;
@@ -1158,7 +1071,7 @@ static cmdResponseType setJog(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType setFeedOverride(connectionRecType *context)
+static cmdResponseType setFeedOverride(sessionContext *context)
 {
   char *s = strtok(NULL, delims);
   if (!s)
@@ -1174,7 +1087,7 @@ static cmdResponseType setFeedOverride(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType setJogIncr(connectionRecType *context)
+static cmdResponseType setJogIncr(sessionContext *context)
 {
   int jnum,ja,jjogmode;
   char aletter;
@@ -1211,13 +1124,13 @@ static cmdResponseType setJogIncr(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType setTaskPlanInit(connectionRecType *context)
+static cmdResponseType setTaskPlanInit(sessionContext *context)
 {
   if (sendTaskPlanInit() != 0) return rtStandardError;
   return rtNoError;
 }
 
-static cmdResponseType setOpen(connectionRecType *context)
+static cmdResponseType setOpen(sessionContext *context)
 {
   char *s = strtok(NULL, delims);
   if (!s) return rtStandardError;
@@ -1236,7 +1149,7 @@ static cmdResponseType setOpen(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType setRun(connectionRecType *context)
+static cmdResponseType setRun(sessionContext *context)
 {
   char *s = strtok(NULL, delims);
   if (!s) { // run from beginning
@@ -1256,31 +1169,31 @@ static cmdResponseType setRun(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType setPause(connectionRecType *context)
+static cmdResponseType setPause(sessionContext *context)
 {
   if (sendProgramPause() != 0) return rtStandardError;
   return rtNoError;
 }
 
-static cmdResponseType setResume(connectionRecType *context)
+static cmdResponseType setResume(sessionContext *context)
 {
   if (sendProgramResume() != 0) return rtStandardError;
   return rtNoError;
 }
 
-static cmdResponseType setStep(connectionRecType *context)
+static cmdResponseType setStep(sessionContext *context)
 {
   if (sendProgramStep() != 0) return rtStandardError;
   return rtNoError;
 }
 
-static cmdResponseType setAbort(connectionRecType *context)
+static cmdResponseType setAbort(sessionContext *context)
 {
   if (sendAbort() != 0) return rtStandardError;
   return rtNoError;
 }
 
-static cmdResponseType setLinearUnitConversion(connectionRecType *context)
+static cmdResponseType setLinearUnitConversion(sessionContext *context)
 {
    char *s = strtok(NULL, delims); 
    switch (checkConversionStr(s)) {
@@ -1294,7 +1207,7 @@ static cmdResponseType setLinearUnitConversion(connectionRecType *context)
    return rtNoError;
 }
 
-static cmdResponseType setAngularUnitConversion(connectionRecType *context)
+static cmdResponseType setAngularUnitConversion(sessionContext *context)
 {
    char *s = strtok(NULL, delims);
    switch (checkAngularConversionStr(s)) {
@@ -1308,7 +1221,7 @@ static cmdResponseType setAngularUnitConversion(connectionRecType *context)
    return rtNoError;
 }
 
-static cmdResponseType setTeleopEnable(connectionRecType *context)
+static cmdResponseType setTeleopEnable(sessionContext *context)
 {
    char *s = strtok(NULL, delims);
    switch (checkOnOff(s)) {
@@ -1323,7 +1236,7 @@ static cmdResponseType setTeleopEnable(connectionRecType *context)
    return rtNoError;
 }
 
-static cmdResponseType setProbe(connectionRecType *context)
+static cmdResponseType setProbe(sessionContext *context)
 {
   float x, y, z;
   
@@ -1346,13 +1259,13 @@ static cmdResponseType setProbe(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType setProbeClear(connectionRecType *context)
+static cmdResponseType setProbeClear(sessionContext *context)
 {
   if(sendClearProbeTrippedFlag() != 0) return rtStandardError;
   return rtNoError;
 }
 
-static cmdResponseType setSpindleOverride(connectionRecType *context)
+static cmdResponseType setSpindleOverride(sessionContext *context)
 {
     // handle no spindle present
     if (emcStatus->motion.traj.spindles == 0) {
@@ -1410,7 +1323,7 @@ static cmdResponseType setSpindleOverride(connectionRecType *context)
 	return rtNoError;
 }
 
-static cmdResponseType setOptionalStop(connectionRecType *context)
+static cmdResponseType setOptionalStop(sessionContext *context)
 {
   int value;
   char *s = strtok(NULL, delims);
@@ -1419,7 +1332,7 @@ static cmdResponseType setOptionalStop(connectionRecType *context)
   return rtNoError;
 }
 
-int commandSet(connectionRecType *context)
+int commandSet(sessionContext *context)
 {
   cmdTokenType cmd;
   cmdResponseType ret = rtNoError;
@@ -1427,13 +1340,13 @@ int commandSet(connectionRecType *context)
   // parse cmd token
   char *tokenStr = strtok(NULL, delims);
   if (!tokenStr) {
-    dprintf(context->cliSock, "SET NAK\r\n");
+    dprintf(context->sockfd, "SET NAK\r\n");
     return -1;
   }
   strupr(tokenStr);
   cmd = lookupCommandToken(tokenStr);
-  if ((cmd >= scIniFile) && (context->cliSock != enabledConn)) {
-    dprintf(context->cliSock, "SET %s NAK\r\n", tokenStr);
+  if ((cmd >= scIniFile) && (context->sockfd != enabledConn)) {
+    dprintf(context->sockfd, "SET %s NAK\r\n", tokenStr);
     return -1;
   }
 
@@ -1442,7 +1355,7 @@ int commandSet(connectionRecType *context)
     //  sending a set command when the machine state is off. This condition is detected
     //  and appropriate error messages are generated, however erratic behavior has been
     //  seen when doing certain set commands when the Machine state is other than 'On
-    dprintf(context->cliSock, "SET %s NAK\r\n", tokenStr);
+    dprintf(context->sockfd, "SET %s NAK\r\n", tokenStr);
     return -1;
   }
 
@@ -1527,21 +1440,21 @@ int commandSet(connectionRecType *context)
 
     case rtNoError:  
       if (context->verbose) {
-        dprintf(context->cliSock, "SET %s ACK\r\n", tokenStr);
+        dprintf(context->sockfd, "SET %s ACK\r\n", tokenStr);
       }
       return -1;
 
     // Custom ok response already handled, take no action
-    case rtHandledNoError:
+    case rtHandledNoError: 
       break;
 
     case rtStandardError:
-      dprintf(context->cliSock, "SET %s NAK\r\n", tokenStr);
+      dprintf(context->sockfd, "SET %s NAK\r\n", tokenStr);
       return -1;
 
     // Custom error response entered in buffer
     case rtCustomError:
-      dprintf(context->cliSock, "error: %s\r\n", context->outBuf);
+      dprintf(context->sockfd, "error: %s\r\n", context->outBuf);
       return -1;
 
     // Custom error response handled, take no action
@@ -1551,36 +1464,35 @@ int commandSet(connectionRecType *context)
   return 0;
 }
 
-
-static cmdResponseType getEcho(connectionRecType *context)
+static cmdResponseType getEcho(sessionContext *context)
 {
   if (context->echo) OUT("ECHO ON");
   else OUT("ECHO OFF");
   return rtNoError;
 }
 
-static cmdResponseType getVerbose(connectionRecType *context)
+static cmdResponseType getVerbose(sessionContext *context)
 {
   if (context->verbose) OUT("VERBOSE ON");
   else OUT("VERBOSE OFF");
   return rtNoError;
 }
 
-static cmdResponseType getEnable(connectionRecType *context)
+static cmdResponseType getEnable(sessionContext *context)
 {
-  if (context->cliSock == enabledConn) 
+  if (context->sockfd == enabledConn)
     OUT("ENABLE ON");
   else OUT("ENABLE OFF");
   return rtNoError;
 }
 
-static cmdResponseType getConfig(connectionRecType *context)
+static cmdResponseType getConfig(sessionContext *context)
 {
   OUT("GET CONFIG not implemented");
   return rtCustomError;
 }
 
-static cmdResponseType getCommMode(connectionRecType *context)
+static cmdResponseType getCommMode(sessionContext *context)
 {
   switch (context->commMode) {
     case 0: OUT("COMM_MODE ASCII"); break;
@@ -1589,19 +1501,19 @@ static cmdResponseType getCommMode(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getCommProt(connectionRecType *context)
+static cmdResponseType getCommProt(sessionContext *context)
 {
   OUT("COMM_PROT %s", context->version);
   return rtNoError;
 }
 
-static cmdResponseType getDebug(connectionRecType *context)
+static cmdResponseType getDebug(sessionContext *context)
 {
   OUT("DEBUG %d", emcStatus->debug);
   return rtNoError;
 }
 
-static cmdResponseType getWaitMode(connectionRecType *context)
+static cmdResponseType getWaitMode(sessionContext *context)
 {
   switch (emcWaitType) {
     case EMC_WAIT_RECEIVED: OUT("WAIT_MODE RECEIVED"); break;
@@ -1611,13 +1523,13 @@ static cmdResponseType getWaitMode(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getPlat(connectionRecType *context)
+static cmdResponseType getPlat(sessionContext *context)
 {
   OUT("PLAT Linux");
   return rtNoError;  
 }
 
-static cmdResponseType getEStop(connectionRecType *context)
+static cmdResponseType getEStop(sessionContext *context)
 {
   if (emcStatus->task.state == EMC_TASK_STATE::ESTOP)
     OUT("ESTOP ON");
@@ -1625,19 +1537,19 @@ static cmdResponseType getEStop(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getTimeout(connectionRecType *context)
+static cmdResponseType getTimeout(sessionContext *context)
 {  
   OUT("TIMEOUT %f", emcTimeout);
   return rtNoError;
 }
 
-static cmdResponseType getTime(connectionRecType *context)
+static cmdResponseType getTime(sessionContext *context)
 {  
   OUT("TIME %f", etime());
   return rtNoError;
 }
 
-static cmdResponseType getUpdate(connectionRecType *context)
+static cmdResponseType getUpdate(sessionContext *context)
 {
     switch(emcUpdateType) {
         case EMC_UPDATE_NONE:
@@ -1656,7 +1568,7 @@ static cmdResponseType getUpdate(connectionRecType *context)
     return rtNoError;
 }
 
-static cmdResponseType getError(connectionRecType *context)
+static cmdResponseType getError(sessionContext *context)
 {
   if (updateError() != 0) {
     OUT("emc_error: bad status from LinuxCNC");
@@ -1672,7 +1584,7 @@ static cmdResponseType getError(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getOperatorDisplay(connectionRecType *context)
+static cmdResponseType getOperatorDisplay(sessionContext *context)
 {
   if (updateError() != 0) {
     OUT("emc_operator_display: bad status from LinuxCNC");
@@ -1688,7 +1600,7 @@ static cmdResponseType getOperatorDisplay(connectionRecType *context)
   return rtNoError; 
 }
 
-static cmdResponseType getOperatorText(connectionRecType *context)
+static cmdResponseType getOperatorText(sessionContext *context)
 {
   if (updateError() != 0) {
     OUT("emc_operator_text: bad status from LinuxCNC");
@@ -1704,7 +1616,7 @@ static cmdResponseType getOperatorText(connectionRecType *context)
   return rtNoError; 
 }
 
-static cmdResponseType getMachine(connectionRecType *context)
+static cmdResponseType getMachine(sessionContext *context)
 {
   if (emcStatus->task.state == EMC_TASK_STATE::ON)
     OUT("MACHINE ON");
@@ -1713,7 +1625,7 @@ static cmdResponseType getMachine(connectionRecType *context)
   return rtNoError; 
 }
 
-static cmdResponseType getMode(connectionRecType *context)
+static cmdResponseType getMode(sessionContext *context)
 {
   switch (emcStatus->task.mode) {
     case EMC_TASK_MODE::MANUAL: OUT("MODE MANUAL"); break;
@@ -1724,7 +1636,7 @@ static cmdResponseType getMode(connectionRecType *context)
   return rtNoError; 
 }
 
-static cmdResponseType getMist(connectionRecType *context)
+static cmdResponseType getMist(sessionContext *context)
 {
   if (emcStatus->io.coolant.mist == 1)
     OUT("MIST ON");
@@ -1732,7 +1644,7 @@ static cmdResponseType getMist(connectionRecType *context)
   return rtNoError; 
 }
 
-static cmdResponseType getFlood(connectionRecType *context)
+static cmdResponseType getFlood(sessionContext *context)
 {
   if (emcStatus->io.coolant.flood == 1)
     OUT("FLOOD ON");
@@ -1740,7 +1652,7 @@ static cmdResponseType getFlood(connectionRecType *context)
   return rtNoError; 
 }
 
-static cmdResponseType getSpindle(connectionRecType *context)
+static cmdResponseType getSpindle(sessionContext *context)
 {
     // handle no spindle present
     if (emcStatus->motion.traj.spindles == 0) {
@@ -1789,7 +1701,7 @@ static cmdResponseType getSpindle(connectionRecType *context)
     return rtNoError;
 }
 
-static cmdResponseType getBrake(connectionRecType *context)
+static cmdResponseType getBrake(sessionContext *context)
 {
     // handle no spindle present
     if (emcStatus->motion.traj.spindles == 0) {
@@ -1833,19 +1745,19 @@ static cmdResponseType getBrake(connectionRecType *context)
     return rtNoError;
 }
 
-static cmdResponseType getTool(connectionRecType *context)
+static cmdResponseType getTool(sessionContext *context)
 {  
   OUT("TOOL %d", emcStatus->io.tool.toolInSpindle);
   return rtNoError; 
 }
 
-static cmdResponseType getToolOffset(connectionRecType *context)
+static cmdResponseType getToolOffset(sessionContext *context)
 {
   OUT("TOOL_OFFSET %f", emcStatus->task.toolOffset.tran.z);
   return rtNoError; 
 }
 
-static cmdResponseType getAbsCmdPos(connectionRecType *context)
+static cmdResponseType getAbsCmdPos(sessionContext *context)
 {
   char *axisStr = strtok(NULL, delims);
   int axis = axisnumber(axisStr);
@@ -1892,7 +1804,7 @@ static cmdResponseType getAbsCmdPos(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getAbsActPos(connectionRecType *context)
+static cmdResponseType getAbsActPos(sessionContext *context)
 {
   char *axisStr = strtok(NULL, delims);
   int axis = axisnumber(axisStr);
@@ -1939,7 +1851,7 @@ static cmdResponseType getAbsActPos(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getRelCmdPos(connectionRecType *context)
+static cmdResponseType getRelCmdPos(sessionContext *context)
 {
   char *axisStr = strtok(NULL, delims);
   int axis = axisnumber(axisStr);
@@ -1986,7 +1898,7 @@ static cmdResponseType getRelCmdPos(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getRelActPos(connectionRecType *context)
+static cmdResponseType getRelActPos(sessionContext *context)
 {
   char *axisStr = strtok(NULL, delims);
   int axis = axisnumber(axisStr);
@@ -2033,7 +1945,7 @@ static cmdResponseType getRelActPos(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getJointPos(connectionRecType *context)
+static cmdResponseType getJointPos(sessionContext *context)
 {
   int joint = -1; // Return all axes by default
 
@@ -2058,7 +1970,7 @@ static cmdResponseType getJointPos(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getPosOffset(connectionRecType *context)
+static cmdResponseType getPosOffset(sessionContext *context)
 {
   char *axisStr = strtok(NULL, delims);
   int axis = axisnumber(axisStr);
@@ -2104,12 +2016,12 @@ static cmdResponseType getPosOffset(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getJointLimit(connectionRecType *context)
+static cmdResponseType getJointLimit(sessionContext *context)
 {
   const char *pJointLimit = "JOINT_LIMIT";
   char buf[16];
   int joint, i;
-  
+
   char *s = strtok(NULL, delims);
   if (!s) {
     rtapi_strxcpy(context->outBuf, pJointLimit);
@@ -2149,7 +2061,7 @@ static cmdResponseType getJointLimit(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getJointFault(connectionRecType *context)
+static cmdResponseType getJointFault(sessionContext *context)
 {
   const char *pJointFault = "JOINT_FAULT";
   char buf[16];
@@ -2174,7 +2086,7 @@ static cmdResponseType getJointFault(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getOverrideLimits(connectionRecType *context)
+static cmdResponseType getOverrideLimits(sessionContext *context)
 {
   const char *pOverrideLimits = "OVERRIDE_LIMITS %d";
   
@@ -2182,7 +2094,7 @@ static cmdResponseType getOverrideLimits(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getJointHomed(connectionRecType *context)
+static cmdResponseType getJointHomed(sessionContext *context)
 {
   const char *pJointHomed = "JOINT_HOMED";
   char buf[16];
@@ -2206,7 +2118,7 @@ static cmdResponseType getJointHomed(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getProgram(connectionRecType *context)
+static cmdResponseType getProgram(sessionContext *context)
 {
   if (emcStatus->task.file[0] != 0)
     OUT("PROGRAM %s", emcStatus->task.file);
@@ -2215,7 +2127,7 @@ static cmdResponseType getProgram(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getProgramLine(connectionRecType *context)
+static cmdResponseType getProgramLine(sessionContext *context)
 {
   int lineNo;
   
@@ -2232,7 +2144,7 @@ static cmdResponseType getProgramLine(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getProgramStatus(connectionRecType *context)
+static cmdResponseType getProgramStatus(sessionContext *context)
 {
   switch (emcStatus->task.interpState) {
       case EMC_TASK_INTERP::READING:
@@ -2243,7 +2155,7 @@ static cmdResponseType getProgramStatus(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getProgramCodes(connectionRecType *context)
+static cmdResponseType getProgramCodes(sessionContext *context)
 {
   const char *pProgramCodes = "PROGRAM_CODES ";
   char buf[256];
@@ -2265,7 +2177,7 @@ static cmdResponseType getProgramCodes(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getJointType(connectionRecType *context)
+static cmdResponseType getJointType(sessionContext *context)
 {
   const char *pJointType = "JOINT_TYPE";
   char buf[16];
@@ -2294,7 +2206,7 @@ static cmdResponseType getJointType(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getJointUnits(connectionRecType *context)
+static cmdResponseType getJointUnits(sessionContext *context)
 {
   const char *pJointUnits = "JOINT_UNITS";
   char buf[16];
@@ -2363,7 +2275,7 @@ static cmdResponseType getJointUnits(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getProgramLinearUnits(connectionRecType *context)
+static cmdResponseType getProgramLinearUnits(sessionContext *context)
 {
   switch (emcStatus->task.programUnits) {
     case CANON_UNITS_INCHES: OUT("PROGRAM_UNITS INCH"); break;
@@ -2374,13 +2286,13 @@ static cmdResponseType getProgramLinearUnits(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getProgramAngularUnits(connectionRecType *context)
+static cmdResponseType getProgramAngularUnits(sessionContext *context)
 {
   OUT("PROGRAM_ANGULAR_UNITS DEG");
   return rtNoError;
 }
 
-static cmdResponseType getUserLinearUnits(connectionRecType *context)
+static cmdResponseType getUserLinearUnits(sessionContext *context)
 {
   if (CLOSE(emcStatus->motion.traj.linearUnits, 1.0, LINEAR_CLOSENESS))
     OUT("USER_LINEAR_UNITS MM");
@@ -2395,7 +2307,7 @@ static cmdResponseType getUserLinearUnits(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getUserAngularUnits(connectionRecType *context)
+static cmdResponseType getUserAngularUnits(sessionContext *context)
 {
   if (CLOSE(emcStatus->motion.traj.angularUnits, 1.0, ANGULAR_CLOSENESS))
     OUT("USER_ANGULAR_UNITS DEG");
@@ -2410,7 +2322,7 @@ static cmdResponseType getUserAngularUnits(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getDisplayLinearUnits(connectionRecType *context)
+static cmdResponseType getDisplayLinearUnits(sessionContext *context)
 {
   switch (linearUnitConversion) {
       case LINEAR_UNITS_INCH: OUT("DISPLAY_LINEAR_UNITS INCH"); break;
@@ -2429,7 +2341,7 @@ static cmdResponseType getDisplayLinearUnits(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getDisplayAngularUnits(connectionRecType *context)
+static cmdResponseType getDisplayAngularUnits(sessionContext *context)
 {
   switch (angularUnitConversion) {
       case ANGULAR_UNITS_DEG: OUT("DISPLAY_ANGULAR_UNITS DEG"); break;
@@ -2441,7 +2353,7 @@ static cmdResponseType getDisplayAngularUnits(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getLinearUnitConversion(connectionRecType *context)
+static cmdResponseType getLinearUnitConversion(sessionContext *context)
 {
   switch (linearUnitConversion) {
       case LINEAR_UNITS_INCH: OUT("LINEAR_UNIT_CONVERSION INCH"); break;
@@ -2453,7 +2365,7 @@ static cmdResponseType getLinearUnitConversion(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getAngularUnitConversion(connectionRecType *context)
+static cmdResponseType getAngularUnitConversion(sessionContext *context)
 {
   switch (angularUnitConversion) {
       case ANGULAR_UNITS_DEG: OUT("ANGULAR_UNIT_CONVERSION DEG"); break;
@@ -2465,19 +2377,19 @@ static cmdResponseType getAngularUnitConversion(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getProbeValue(connectionRecType *context)
+static cmdResponseType getProbeValue(sessionContext *context)
 {
   OUT("PROBE_VALUE %d", emcStatus->motion.traj.probeval);
   return rtNoError;
 }
 
-static cmdResponseType getProbeTripped(connectionRecType *context)
+static cmdResponseType getProbeTripped(sessionContext *context)
 {
   OUT("PROBE_TRIPPED %d", emcStatus->motion.traj.probe_tripped);
   return rtNoError;
 }
 
-static cmdResponseType getTeleopEnable(connectionRecType *context)
+static cmdResponseType getTeleopEnable(sessionContext *context)
 {
   if (emcStatus->motion.traj.mode == EMC_TRAJ_MODE::TELEOP)
     OUT("TELEOP_ENABLE ON");
@@ -2485,26 +2397,26 @@ static cmdResponseType getTeleopEnable(connectionRecType *context)
   return rtNoError;
 }
 
-static cmdResponseType getKinematicsType(connectionRecType *context)
+static cmdResponseType getKinematicsType(sessionContext *context)
 {
   OUT("KINEMATICS_TYPE %d", emcStatus->motion.traj.kinematics_type);
   return rtNoError;
 }
 
-static cmdResponseType getFeedOverride(connectionRecType *context)
+static cmdResponseType getFeedOverride(sessionContext *context)
 {
   double percent = emcStatus->motion.traj.scale * 100.0;
   OUT("FEED_OVERRIDE %f", percent);
   return rtNoError;
 }
 
-static cmdResponseType getIniFile(connectionRecType *context)
+static cmdResponseType getIniFile(sessionContext *context)
 {
   OUT("INIFILE %s", emc_inifile);
   return rtNoError;
 }
 
-static cmdResponseType getSpindleOverride(connectionRecType *context)
+static cmdResponseType getSpindleOverride(sessionContext *context)
 {
     // handle no spindle present
     if (emcStatus->motion.traj.spindles == 0) {
@@ -2539,19 +2451,19 @@ static cmdResponseType getSpindleOverride(connectionRecType *context)
             continue;
 
 		  double percent = emcStatus->motion.spindle[n].spindle_scale * 100.0;
-		  dprintf(context->cliSock, "SPINDLE_OVERRIDE %d %f\r\n", n, percent);
+		  dprintf(context->sockfd, "SPINDLE_OVERRIDE %d %f\r\n", n, percent);
   }
 
   return rtNoError;
 }
 
-static cmdResponseType getOptionalStop(connectionRecType *context)
+static cmdResponseType getOptionalStop(sessionContext *context)
 {
   OUT("OPTIONAL_STOP %d", emcStatus->task.optional_stop_state);
   return rtNoError;
 }
 
-int commandGet(connectionRecType *context)
+int commandGet(sessionContext *context)
 {
   const static char *setCmdNakStr = "GET %s NAK\r\n";
   cmdTokenType cmd;
@@ -2560,7 +2472,7 @@ int commandGet(connectionRecType *context)
   
   pch = strtok(NULL, delims);
   if (!pch) {
-    dprintf(context->cliSock, "GET NAK\r\n");
+    dprintf(context->sockfd, "GET NAK\r\n");
     return -1;
   }
   if (emcUpdateType == EMC_UPDATE_AUTO) updateStatus();
@@ -2647,42 +2559,44 @@ int commandGet(connectionRecType *context)
     }
   switch (ret) {
     case rtNoError: // Standard ok response, just write value in buffer
-      dprintf(context->cliSock, "%s\r\n", context->outBuf);
+      dprintf(context->sockfd, "%s\r\n", context->outBuf);
       break;
     case rtHandledNoError: // Custom ok response already handled, take no action
       break; 
     case rtStandardError: // Standard error response
-      dprintf(context->cliSock, setCmdNakStr, pch);
+      dprintf(context->sockfd, setCmdNakStr, pch);
       break;
     case rtCustomError: // Custom error response entered in buffer
-      dprintf(context->cliSock, "error: %s\r\n", context->outBuf);
+      dprintf(context->sockfd, "error: %s\r\n", context->outBuf);
       break;    
     case rtCustomHandledError: ;// Custom error response handled, take no action
     }
   return 0;
 }
 
-int commandQuit(connectionRecType *context)
+int commandQuit(sessionContext *context)
 {
   printf("Closing connection with %s\n", context->hostName);
   return -1;
 }
 
-int commandShutdown(connectionRecType *context)
-{
-  if (context->cliSock == enabledConn) {
+int commandShutdown(sessionContext *context) {
+
+  if (context->sockfd == enabledConn) {
     printf("Shutting down\n");
-    thisQuit();
+    //cleanupNml();
+    /* signal to shutdown before accept()ing a new telnet connection */
+    shutdown_server = true;
     return -1;
     }
   else
     return 0;
 }
 
-static int helpGeneral(connectionRecType *context)
+static int helpGeneral(sessionContext *context)
 {
   dprintf(
-    context->cliSock,
+    context->sockfd,
     "Available commands:\r\n"
     "  Hello <password> <client name> <protocol version>\r\n"
     "  Get <LinuxCNC command>\r\n"
@@ -2693,10 +2607,10 @@ static int helpGeneral(connectionRecType *context)
   return 0;
 }
 
-static int helpHello(connectionRecType *context)
+static int helpHello(sessionContext *context)
 {
   dprintf(
-    context->cliSock,
+    context->sockfd,
     "Usage:\r\n"
     "  Hello <Password> <Client Name> <Protocol Version>\r\nWhere:\r\n"
     "  Password is the connection password to allow communications with the CNC server.\r\n"
@@ -2714,10 +2628,10 @@ static int helpHello(connectionRecType *context)
   return 0;
 }
 
-static int helpGet(connectionRecType *context)
+static int helpGet(sessionContext *context)
 {
   dprintf(
-    context->cliSock,
+    context->sockfd,
     "Usage:\r\nGet <LinuxCNC command>\r\n"
     "  Get commands require that a hello has been successfully negotiated.\r\n"
     "  LinuxCNC command may be one of:\r\n"
@@ -2782,10 +2696,10 @@ static int helpGet(connectionRecType *context)
   return 0;
 }
 
-static int helpSet(connectionRecType *context)
+static int helpSet(sessionContext *context)
 {
   dprintf(
-    context->cliSock,
+    context->sockfd,
     "Usage:\r\n  Set <LinuxCNC command>\r\n"
     "  Set commands require that a hello has been successfully negotiated,\r\n"
     "  in most instances requires that control be enabled by the connection.\r\n"
@@ -2835,10 +2749,10 @@ static int helpSet(connectionRecType *context)
   return 0;
 }
 
-static int helpQuit(connectionRecType *context)
+static int helpQuit(sessionContext *context)
 {
   dprintf(
-    context->cliSock,
+    context->sockfd,
     "Usage:\r\n"
     "  The quit command has the server initiate a disconnect from the client,\r\n"
     "  the command has no parameters and no requirements to have negotiated\r\n"
@@ -2847,10 +2761,10 @@ static int helpQuit(connectionRecType *context)
   return 0;
 }
 
-static int helpShutdown(connectionRecType *context)
+static int helpShutdown(sessionContext *context)
 {
   dprintf(
-    context->cliSock,
+    context->sockfd,
     "Usage:\r\n"
     "  The shutdown command terminates the connection with all clients,\r\n"
     "  and initiates a shutdown of LinuxCNC. The command has no parameters, and\r\n"
@@ -2859,16 +2773,16 @@ static int helpShutdown(connectionRecType *context)
   return 0;
 }
 
-static int helpHelp(connectionRecType *context)
+static int helpHelp(sessionContext *context)
 {
   dprintf(
-    context->cliSock,
+    context->sockfd,
     "If you need help on help, it is time to look into another line of work.\r\n"
   );
   return 0;
 }
 
-int commandHelp(connectionRecType *context)
+int commandHelp(sessionContext *context)
 {
   char *s = strtok(NULL, delims);
   if (!s) return (helpGeneral(context));
@@ -2879,7 +2793,7 @@ int commandHelp(connectionRecType *context)
   if (strcmp(s, "QUIT") == 0) return (helpQuit(context));
   if (strcmp(s, "SHUTDOWN") == 0) return (helpShutdown(context));
   if (strcmp(s, "HELP") == 0) return (helpHelp(context));
-  dprintf(context->cliSock, "%s is not a valid command.", s);
+  dprintf(context->sockfd, "%s is not a valid command.", s);
   return 0;
 }
 
@@ -2899,12 +2813,12 @@ cmdType lookupCommand(char *s)
 }
   
 // handle the linuxcncrsh command in context->inBuf
-int parseCommand(connectionRecType *context)
+int parseCommand(sessionContext *context)
 {
   int ret = 0;
-  char *cmdStr;
+  char *cmdStr = strtok(context->inBuf, delims);
 
-  if (!(cmdStr = strtok(context->inBuf, delims)))
+  if (!cmdStr)
     return -1;
 
   strupr(cmdStr);
@@ -2912,9 +2826,9 @@ int parseCommand(connectionRecType *context)
 
     case cmdHello: 
       if ((ret = commandHello(context)) < 0)
-        dprintf(context->cliSock, "HELLO NAK\r\n");
-      else
-        dprintf(context->cliSock, "HELLO ACK %s 1.1\r\n", serverName);
+        dprintf(context->sockfd, "HELLO NAK\r\n");
+      else      
+        dprintf(context->sockfd, "HELLO ACK %s 1.1\r\n", serverName);
       break;
 
     case cmdGet: 
@@ -2923,7 +2837,7 @@ int parseCommand(connectionRecType *context)
 
     case cmdSet:
       if (!context->linked) {
-        dprintf(context->cliSock, "SET NAK\r\n");
+        dprintf(context->sockfd, "SET NAK\r\n");
         ret = -1;
         break;
       }
@@ -2936,7 +2850,7 @@ int parseCommand(connectionRecType *context)
 
     case cmdShutdown:
       if((ret = commandShutdown(context)) < 0) {
-        dprintf(context->cliSock, "SHUTDOWN NAK\r\n");
+        dprintf(context->sockfd, "SHUTDOWN NAK\r\n");
       }
       break;
 
@@ -2946,123 +2860,10 @@ int parseCommand(connectionRecType *context)
 
     default:
       ret = -2;
+
   }
 
   return ret;
-}
-
-void *readClient(void *arg)
-{
-  char buf[1600];
-  int context_index;
-  int i;
-  int len;
-  connectionRecType *context = (connectionRecType *)arg;
-
-  context_index = 0;
-
-  while (1) {
-    // We always start this loop with an empty buf, though there may be one
-    // partial line in context->inBuf[0..context_index].
-    len = read(context->cliSock, buf, sizeof(buf));
-    if (len < 0) {
-      fprintf(stderr, "linuxcncrsh: error reading from client: %s\n", strerror(errno));
-      goto finished;
-    }
-    if (len == 0) {
-      printf("linuxcncrsh: eof from client\n");
-      goto finished;
-    }
-
-    if (context->echo && context->linked)
-      if(write(context->cliSock, buf, len) != (ssize_t)len) {
-        fprintf(stderr, "linuxcncrsh: write() failed: %s", strerror(errno));
-      }
-
-    for (i = 0; i < len; i ++) {
-        if ((buf[i] != '\n') && (buf[i] != '\r')) {
-            context->inBuf[context_index] = buf[i];
-            context_index ++;
-            continue;
-        }
-
-        // if we get here, i is the index of a line terminator in buf
-
-        if (context_index > 0) {
-            // we have some bytes in the context buffer, parse them now
-            context->inBuf[context_index] = '\0';
-
-            // The return value from parseCommand was meant to indicate
-            // success or error, but it is unusable.  Some paths return
-            // the return value of write(2) and some paths return small
-            // positive integers (cmdResponseType) to indicate failure.
-            // We're best off just ignoring it.
-            (void)parseCommand(context);
-
-            context_index = 0;
-        }
-    }
-  }
-
-finished:
-  printf("linuxcncrsh: disconnecting client %s (%s)\n", context->hostName, context->version);
-  close(context->cliSock);
-  free(context);
-  pthread_exit((void *)0);
-  sessions--;  // FIXME: not reached
-}
-
-int sockMain()
-{
-    int res;
-
-    while (1) {
-        int client_sockfd;
-        client_len = sizeof(client_address);
-        client_sockfd = accept(server_sockfd, (struct sockaddr *)&client_address, &client_len);
-        if (client_sockfd < 0) exit(0);
-        // count connected clients
-        sessions++;
-        // enforce limited amount of clients that can connect simultaniously
-        if ((maxSessions == -1) || (sessions <= maxSessions)) {
-            pthread_t *thrd;
-            connectionRecType *context;
-
-            thrd = (pthread_t *)calloc(1, sizeof(pthread_t));
-            if (!thrd) {
-                fprintf(stderr, "linuxcncrsh: out of memory\n");
-                exit(1);
-            }
-
-            context = (connectionRecType *)malloc(sizeof(connectionRecType));
-            if (!context) {
-                fprintf(stderr, "linuxcncrsh: out of memory\n");
-                exit(1);
-            }
-
-            context->cliSock = client_sockfd;
-            context->linked = false;
-            context->echo = true;
-            context->verbose = false;
-            rtapi_strxcpy(context->version, "1.0");
-            rtapi_strxcpy(context->hostName, "Default");
-            context->enabled = false;
-            context->commMode = 0;
-            context->commProt = 0;
-            context->inBuf[0] = 0;
-
-            res = pthread_create(thrd, NULL, readClient, (void *)context);
-        } else {
-            fprintf(stderr, "linuxcncrsh: maximum amount of sessions exceeded: %d\n", maxSessions);
-            res = -1;
-        }
-        // discard connection upon error
-        if (res != 0) {
-            close(client_sockfd);
-            sessions--;
-        }
-    }
-    return 0;
 }
 
 static void usage(char* pname) {
@@ -3074,16 +2875,258 @@ static void usage(char* pname) {
            "         --name       <server name>  (default=%s)\n"
            "         --connectpw  <password>     (default=%s)\n"
            "         --enablepw   <password>     (default=%s)\n"
-           "         --sessions   <max sessions> (default=%d) (-1 ==> no limit) \n"
            "         --path       <path>         (default=%s)\n"
            "LinuxCNC_Options:\n"
            "          -ini        <INI file>      (default=%s)\n"
-          ,pname,port,serverName,pwd,enablePWD,maxSessions,defaultPath,emc_inifile
+          ,pname,port,serverName,pwd,enablePWD,defaultPath,emc_inifile
           );
+}
+
+/**
+ ==> HELLO <==
+
+  Hello <password> <client> <version>
+  If a valid password was entered the server will respond with
+
+  HELLO ACK <Server Name> <Server Version>
+
+  Where server name and server version are looked up from the implementation.
+  if an invalid password or any other syntax error occurs then the server 
+  responds with:
+
+  HELLO NAK
+*/
+int cmd_hello(struct cli_def *cli, const char *command, char *argv[], int argc) {
+  /* get context */
+  sessionContext *context = (sessionContext *) cli_get_context(cli);
+
+  /* get argument */
+  if(argc < 3)
+    return CLI_ERROR;
+
+  char *client_name = argv[0];
+  char *password = argv[1];
+  char *version = argv[2];
+
+  // check password
+  if (strcmp(password, pwd) != 0)
+    return CLI_ERROR;
+
+  // get announced client name
+  if(rtapi_strlcpy(context->hostName, client_name, sizeof(context->hostName)) >= sizeof(context->hostName)) {
+    return CLI_ERROR;
+  }
+
+  // get version string
+  if(rtapi_strlcpy(context->version, version, sizeof(context->version)) >= sizeof(context->version)) {
+    return CLI_ERROR;
+  }
+
+  return CLI_OK;
+}
+
+/* helper function to register command */
+void initCommand(struct cli_def *cli, const command *cmd, struct cli_command *parent) {
+  /* register new libcli command */
+  struct cli_command *c = cli_register_command(
+    cli,
+    parent,
+    cmd->name,
+    cmd_hello,
+    cmd->priviledge,
+    cmd->mode,
+    cmd->help
+  );
+  /* register arguments for this command (if any) */
+  for(const struct command::commandArg *arg = cmd->arguments; arg && arg->name; arg++) {
+    cli_register_optarg(
+      c, arg->name,
+      arg->flags,
+      arg->priviledge,
+      arg->mode,
+      arg->help,
+      arg->get_completions,
+      arg->validator,
+      arg->transient_mode
+    );
+  }
+  /* register children recursively */
+  for(command * const *child = cmd->children; *child && (*child)->name; child++) {
+    initCommand(cli, *child, c);
+  }
+}
+
+/* initialize libcli stuff */
+static struct cli_def *initCli() {
+  // initialize libcli
+  struct cli_def *cli = cli_init();
+  
+  // set the hostname (shown in the the prompt)
+  cli_set_hostname(cli, serverName);
+
+  // set the greeting
+  cli_set_banner(cli, "LinuxCNC shell");
+
+  /* register all commands */
+  for(const command *cmd = shell_commands; cmd && cmd->name; cmd++) {
+    initCommand(cli, cmd, NULL);
+  }
+  
+// "Usage:\r\n"
+//     "  "
+//     "  \r\n"
+//     "  \r\n"
+//     "  \r\n\r\n"
+//     "  With valid password, server responds with:\r\n"
+//     "  Hello Ack <Server Name> <Protocol Version>\r\nWhere:\r\n"
+//     "  Ack is acknowledging the connection has been made.\r\n"
+//     "  Server Name is the name of the LinuxCNC Server to which the client has connected.\r\n"
+//     "  Protocol Version is the client requested version or latest version support by server if"
+//     "  the client requests a version later than that supported by the server.\r\n\r\n"
+//     "  With invalid password, the server responds with:\r\n"
+//     "  Hello Nak\r\n"
+  return cli;
+}
+
+/* return sockfd ready to accept() telnet connections */
+static int initSocket()
+{
+  /* get socket */
+  socklen_t server_len;
+  struct sockaddr_in server_address;
+  int optval = SOL_SOCKET;
+  int server_sockfd = socket(AF_INET, SOCK_STREAM, 0);
+  /* set socket options */
+  setsockopt(server_sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+  /* bind socket to address */
+  server_address.sin_family = AF_INET;
+  server_address.sin_addr.s_addr = htonl(INADDR_ANY);
+  server_address.sin_port = htons(port);
+  server_len = sizeof(server_address);
+  if(bind(server_sockfd, (struct sockaddr *)&server_address, server_len) < 0) {
+      rcs_print_error("error initializing sockets: %s\n", strerror(errno));
+      return -1;
+  }
+  /* start listening on socket */
+  if(listen(server_sockfd, 5) < 0) {
+      rcs_print_error("error listening on socket: %s\n", strerror(errno));
+      return -1;
+  }
+
+  /* ignore SIGCHLD */
+  struct sigaction act;
+  act.sa_handler = SIG_IGN;
+  sigemptyset(&act.sa_mask);
+  act.sa_flags = 0;
+  sigaction(SIGCHLD, &act, NULL);
+
+  return server_sockfd;
+}
+
+/* keep reading cli input from this telnet session */
+static void *readLoop(void *arg) {
+  sessionContext *context = (sessionContext *) arg;
+  /* count this new session */
+  sessions++;
+  rcs_print("linuxcncrsh: new client %s (version %s) connected\n", context->hostName, context->version);
+
+  /* initialize libcli */
+  struct cli_def *cli = initCli();
+
+  /* run cli loop that keeps reading commands from client */
+  cli_loop(cli, context->sockfd);
+
+  rcs_print("linuxcncrsh: disconnecting client %s (version %s)\n", context->hostName, context->version);
+
+  /* remove session */
+  sessions--;
+  close(context->sockfd);
+  /* free libcli resources */
+  cli_done(cli);
+  free(context);
+  pthread_exit(EXIT_SUCCESS);
+}
+
+/* keep accepting telnet connections and handle them in a new thread */
+static int socketLoop(int server_sockfd)
+{
+    // keep accepting connections
+    int client_sockfd;
+    struct sockaddr_in client_address;
+    socklen_t client_len = sizeof(client_address);
+    while (!shutdown_server && (client_sockfd = accept(server_sockfd, (struct sockaddr *) &client_address, &client_len))) {
+        if (client_sockfd < 0) {
+          rcs_print_error("accept(): %s\n", strerror(errno));
+          return -1;
+        }
+
+        // get client name
+        char client_name[255];
+        getnameinfo((struct sockaddr *) &client_address, client_len, client_name, sizeof(client_name), NULL, 0, NI_NUMERICHOST);
+    
+        // create thread context
+        sessionContext *context = (sessionContext *) calloc(1, sizeof(sessionContext));
+        if (!context) {
+          dprintf(client_sockfd, "linuxcncrsh: out of memory\r\n");
+          rcs_print_error("linuxcncrsh: out of memory\n");
+          close(client_sockfd);
+          continue;
+        }
+
+        context->sockfd = client_sockfd;
+        rtapi_strxcpy(context->version, "1.0");
+        rtapi_strxcpy(context->hostName, client_name);
+        // context->linked = false;
+        // context->echo = true;
+        // context->verbose = false;
+        // context->enabled = false;
+        // context->commMode = 0;
+        // context->commProt = 0;
+        // context->inBuf[0] = 0;
+
+        // create thread
+        // res = pthread_create(thrd, NULL, readClient, (void *)context);
+        if(pthread_create(&threads[sessions], NULL, readLoop, (void *) context) != 0) {
+          dprintf(client_sockfd, "linuxcncrsh: pthread_create() error\r\n");
+          rcs_print_error("linuxcncrsh: pthread_create() error\n");
+          close(client_sockfd);
+          free(context);
+        }        
+    }
+
+    return 0;
+}
+
+/* deinitialize tryNml() linuxcnc connection */
+static void cleanupNml()
+{
+  if (emcStatusBuffer != 0) {
+    // wait until current message has been received
+    emcCommandWaitReceived();
+  }
+
+  // clean up NML buffers
+
+  if (emcErrorBuffer) {
+    delete emcErrorBuffer;
+    emcErrorBuffer = NULL;
+  }
+
+  if (emcStatusBuffer) {
+	  delete emcStatusBuffer;
+	  emcStatusBuffer = NULL;
+	  emcStatus = NULL;
+  }
+
+  if (emcCommandBuffer) {
+	  delete emcCommandBuffer;
+	  emcCommandBuffer = NULL;
+  }
 }
 
 int main(int argc, char *argv[])
 {
+    int res = EXIT_SUCCESS;  // default return value
     int opt;
 
     // initialize default values
@@ -3103,14 +3146,34 @@ int main(int argc, char *argv[])
     programStartLine = 0;
 
 
-    // process local command line args
-    while ((opt = getopt_long(argc, argv, "he:n:p:s:w:d:", longopts, NULL)) != -1) {
+    const struct option longopts[] = {
+      {"help", 0, NULL, 'h'},
+      {"port", 1, NULL, 'p'},
+      {"name", 1, NULL, 'n'},
+      {"sessions", 1, NULL, 's'},
+      {"connectpw", 1, NULL, 'w'},
+      {"enablepw", 1, NULL, 'e'},
+      {"path", 1, NULL, 'd'},
+      {0,0,0,0}
+    };
+
+    // determine our run mode from our name
+    bool run_telnet_server;
+    if(strcmp("linuxcncrsh", basename(argv[0])) == 0) {
+      rcs_print("running telnet server...\n");
+      run_telnet_server = true;
+    }
+    else {
+      run_telnet_server = false;
+    }
+
+    // process our command line args
+    while ((opt = getopt_long(argc, argv, "he:n:p:w:d:", longopts, NULL)) != -1) {
         switch (opt) {
             case 'h': usage(argv[0]); exit(1);
             case 'e': snprintf(enablePWD, sizeof(enablePWD), "%s", optarg); break;
             case 'n': snprintf(serverName, sizeof(serverName), "%s", optarg); break;
             case 'p': sscanf(optarg, "%d", &port); break;
-            case 's': sscanf(optarg, "%d", &maxSessions); break;
             case 'w': snprintf(pwd, sizeof(pwd), "%s", optarg); break;
             case 'd': snprintf(defaultPath, sizeof(defaultPath), "%s", optarg); break;
         }
@@ -3126,32 +3189,20 @@ int main(int argc, char *argv[])
         rcs_print_error("error in argument list\n");
         exit(1);
     }
-    // get configuration information
+
+    // get linuxcnc configuration information
     iniLoad(emc_inifile);
-    // initialize telnet socket
-    if (initSocket() != 0) {
-        rcs_print_error("error initializing sockets\n");
-        exit(1);
-    }
-    // init NML
+
+    /* connect to linuxcnc */
     if (tryNml() != 0) {
         rcs_print_error("can't connect to LinuxCNC\n");
-        thisQuit();
+        cleanupNml();
         exit(1);
     }
     // get current serial number, and save it for restoring when we quit
     // so as not to interfere with real operator interface
     updateStatus();
     emcCommandSerialNumber = emcStatus->echo_serial_number;
-
-    // attach our quit function to SIGINT
-    {
-        struct sigaction act;
-        act.sa_handler = sigQuit;
-        sigemptyset(&act.sa_mask);
-        act.sa_flags = 0;
-        sigaction(SIGINT, &act, NULL);
-    }
 
     // make all threads ignore SIGPIPE
     {
@@ -3162,7 +3213,30 @@ int main(int argc, char *argv[])
         sigaction(SIGPIPE, &act, NULL);
     }
 
-    if (useSockets) sockMain();
+    /* run telnet server? */
+    if(run_telnet_server) {
+      int server_sockfd;
+      if ((server_sockfd = initSocket()) < 0) {
+          rcs_print_error("error initializing socket\n");
+          return EXIT_FAILURE;
+      }
+      /* run telnet shell */
+      res = socketLoop(server_sockfd);
+    }
+    /* run local shell */
+    else {
+      /* init libcli stuff */
+      struct cli_def *cli = initCli();
+      /* disable libcli telnet protocol support */
+      cli_telnet_protocol(cli, false);
+      /* run local shell */
+      cli_loop(cli, STDIN_FILENO);
+      /* free libcli resources */
+      cli_done(cli);
+    }
 
-    return 0;
+    /* disconnect from linuxcnc */
+    cleanupNml();
+
+    return res;
 }
