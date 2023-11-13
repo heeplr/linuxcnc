@@ -14,7 +14,6 @@
 * Last change:
 ********************************************************************/
 
-#include <asm-generic/socket.h>
 #include <cstddef>
 #include <cstdlib>
 #include <stdlib.h>
@@ -25,6 +24,8 @@
 #include <string.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <asm-generic/socket.h>
+#include <termios.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <getopt.h>
@@ -464,7 +465,8 @@ const char *commands[] = {"HELLO", "SET", "GET", "QUIT", "SHUTDOWN", "HELP", ""}
 
 // format string to outputbuffer (will be presented to user as result of command)
 #define OUT(...) snprintf(context->outBuf, sizeof(context->outBuf), __VA_ARGS__)
-
+// return result and print NAK/ACK in verbose mode
+#define RESULT(res) ({ if(context->verbose) { cli_print(cli, "%s %s", command, res == CLI_OK ? "ACK" : "NAK"); } res; });
 
 static cmdTokenType lookupCommandToken(char *s)
 {
@@ -2900,29 +2902,25 @@ int cmd_hello(struct cli_def *cli, const char *command, char *argv[], int argc) 
   /* get context */
   sessionContext *context = (sessionContext *) cli_get_context(cli);
 
-  /* get argument */
-  if(argc < 3)
-    return CLI_ERROR;
-
-  char *client_name = argv[0];
-  char *password = argv[1];
-  char *version = argv[2];
+  char *client_name = cli_get_optarg_value(cli, "client_name", NULL);
+  char *password = cli_get_optarg_value(cli, "password", NULL);
+  char *version = cli_get_optarg_value(cli, "version", NULL);
 
   // check password
   if (strcmp(password, pwd) != 0)
-    return CLI_ERROR;
+    return RESULT(CLI_ERROR);
 
   // get announced client name
   if(rtapi_strlcpy(context->hostName, client_name, sizeof(context->hostName)) >= sizeof(context->hostName)) {
-    return CLI_ERROR;
+    return RESULT(CLI_ERROR);
   }
 
   // get version string
   if(rtapi_strlcpy(context->version, version, sizeof(context->version)) >= sizeof(context->version)) {
-    return CLI_ERROR;
+    return RESULT(CLI_ERROR);
   }
 
-  return CLI_OK;
+  return RESULT(CLI_OK);
 }
 
 /* helper function to register command */
@@ -3032,6 +3030,8 @@ static void *readLoop(void *arg) {
 
   /* initialize libcli */
   struct cli_def *cli = initCli();
+  /* register context to libcli */
+  cli_set_context(cli, context);
 
   /* run cli loop that keeps reading commands from client */
   cli_loop(cli, context->sockfd);
@@ -3060,11 +3060,11 @@ static int socketLoop(int server_sockfd)
           return -1;
         }
 
-        // get client name
+        /* get client hostname */
         char client_name[255];
         getnameinfo((struct sockaddr *) &client_address, client_len, client_name, sizeof(client_name), NULL, 0, NI_NUMERICHOST);
     
-        // create thread context
+        /* create new context for every thread */
         sessionContext *context = (sessionContext *) calloc(1, sizeof(sessionContext));
         if (!context) {
           dprintf(client_sockfd, "linuxcncrsh: out of memory\r\n");
@@ -3073,6 +3073,7 @@ static int socketLoop(int server_sockfd)
           continue;
         }
 
+        /* initialize context */
         context->sockfd = client_sockfd;
         rtapi_strxcpy(context->version, "1.0");
         rtapi_strxcpy(context->hostName, client_name);
@@ -3085,7 +3086,6 @@ static int socketLoop(int server_sockfd)
         // context->inBuf[0] = 0;
 
         // create thread
-        // res = pthread_create(thrd, NULL, readClient, (void *)context);
         if(pthread_create(&threads[sessions], NULL, readLoop, (void *) context) != 0) {
           dprintf(client_sockfd, "linuxcncrsh: pthread_create() error\r\n");
           rcs_print_error("linuxcncrsh: pthread_create() error\n");
@@ -3159,7 +3159,7 @@ int main(int argc, char *argv[])
 
     // determine our run mode from our name
     bool run_telnet_server;
-    if(strcmp("linuxcncrsh", basename(argv[0])) == 0) {
+    if(strcmp("linuxcncrsh", program_invocation_short_name) == 0) {
       rcs_print("running telnet server...\n");
       run_telnet_server = true;
     }
@@ -3229,10 +3229,50 @@ int main(int argc, char *argv[])
       struct cli_def *cli = initCli();
       /* disable libcli telnet protocol support */
       cli_telnet_protocol(cli, false);
+      /* save current terminal configuration */
+      struct termios old_tattr, tattr;
+      tcgetattr(STDIN_FILENO, &old_tattr);
+      /* configure terminal */
+      tcgetattr(STDIN_FILENO, &tattr);
+      tattr.c_lflag &= ~(ICANON|ECHO);       /* Clear ICANON and ECHO. */
+      tattr.c_iflag &= ~(ICRNL);             /* Clear ICRNL. */
+      tattr.c_cc[VMIN] = 1;
+      tattr.c_cc[VTIME] = 0;
+      tcsetattr(STDIN_FILENO, TCSAFLUSH, &tattr);
+
+      /* create new context */
+      sessionContext *context = (sessionContext *) calloc(1, sizeof(sessionContext));
+      if (!context) {
+        cli_error(cli, "linuxcncrsh: out of memory\n");
+        rcs_print_error("linuxcncrsh: out of memory\n");
+        /* directly quit */
+        goto cleanup;
+      }
+
+      /* initialize context */
+      context->sockfd = STDIN_FILENO;
+      rtapi_strxcpy(context->version, "1.0");
+      rtapi_strxcpy(context->hostName, "local");
+      // context->linked = false;
+      // context->echo = true;
+      context->verbose = true;
+      // context->enabled = false;
+      // context->commMode = 0;
+      // context->commProt = 0;
+      // context->inBuf[0] = 0;
+
+      /* register context to libcli */
+      cli_set_context(cli, context);
+
       /* run local shell */
       cli_loop(cli, STDIN_FILENO);
+
+cleanup:
       /* free libcli resources */
       cli_done(cli);
+
+      /* restore terminal configuration */
+      tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_tattr);
     }
 
     /* disconnect from linuxcnc */
