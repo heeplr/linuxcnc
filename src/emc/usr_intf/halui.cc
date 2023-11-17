@@ -2360,12 +2360,12 @@ int main(int argc, char *argv[])
 	exit(1);
     }
 
-#ifdef TOOL_NML //{
+#ifdef TOOL_NML
     //fprintf(stderr,"%8d HALUI REGISTER %p\n",getpid(),
     tool_nml_register((CANON_TOOL_TABLE*)&emcStatus->io.tool.toolTable);
-#else //}{
+#else
     tool_mmap_user();
-#endif //}
+#endif
 
     // get current serial number, and save it for restoring when we quit
     // so as not to interfere with real operator interface

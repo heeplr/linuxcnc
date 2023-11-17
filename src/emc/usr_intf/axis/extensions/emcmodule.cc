@@ -287,13 +287,13 @@ static bool check_stat(RCS_STAT_CHANNEL *emcStatusBuffer) {
 static bool initialized=0;
 
 static PyObject *poll(pyStatChannel *s, PyObject *o) {
-#ifdef TOOL_NML //{
+#ifdef TOOL_NML
     if (!initialized) {
       //fprintf(stderr,"%8d tool_nml_register\n",getpid());
       tool_nml_register( (CANON_TOOL_TABLE*)&s->status.io.tool.toolTable);
       initialized=1;
     }
-#else //}{
+#else
     static bool mmap_available = 1;
     if (!mmap_available) return NULL;
     if (!initialized) {
@@ -303,7 +303,7 @@ static PyObject *poll(pyStatChannel *s, PyObject *o) {
           fprintf(stderr,"poll(): continuing without tool mmap data\n");
         }
     }
-#endif //}
+#endif
     if(!check_stat(s->c)) return NULL;
     if(s->c->peek() == EMC_STAT_TYPE) {
         EMC_STAT *emcStatus = static_cast<EMC_STAT*>(s->c->get_address());

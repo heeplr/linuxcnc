@@ -563,16 +563,16 @@ int main (int argc, char ** argv)
   _outfile = stdout; /* may be reset below */
   go_flag = 0;
 
-#ifdef TOOL_NML //{
+#ifdef TOOL_NML
   tool_nml_register((CANON_TOOL_TABLE*)& _sai._tools);
-#else //}{
+#else
   const int random_toolchanger = 0;
   tool_mmap_creator((EMC_TOOL_STAT*)NULL,random_toolchanger);
   /* Notes:
   **   1) sai does not use toolInSpindle,pocketPrepped
   **   2) sai does not distinguish changer type
   */
-#endif //}
+#endif
 
   while(1) {
       int c = getopt(argc, argv, "p:t:v:bsn:gi:l:T");

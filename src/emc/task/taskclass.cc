@@ -154,13 +154,13 @@ Task::Task(EMC_IO_STAT & emcioStatus_in) :
         inifile.Close();
     }
 
-#ifdef TOOL_NML //{
+#ifdef TOOL_NML
     tool_nml_register( (CANON_TOOL_TABLE*)&emcStatus->io.tool.toolTable);
-#else //}{
+#else
     tool_mmap_creator((EMC_TOOL_STAT*)&(emcioStatus.tool), random_toolchanger);
     tool_mmap_user();
     // initialize database tool finder:
-#endif //}
+#endif
 
     tooldata_init(random_toolchanger);
     if (db_mode == tooldb_t::DB_ACTIVE) {

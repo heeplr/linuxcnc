@@ -158,14 +158,14 @@ EMC_TOOL_STAT_MSG(EMC_TOOL_STAT_TYPE, sizeof(EMC_TOOL_STAT))
     pocketPrepped = 0; // idx
     toolInSpindle = 0; // toolno
     toolFromPocket = 0; // tool_from_pocket
-#ifdef TOOL_NML //{
+#ifdef TOOL_NML
     int idx;
     for (idx = 0; idx < CANON_POCKETS_MAX; idx++) {
         toolTable[idx] = tooldata_entry_init();
     }
-#else //}{
+#else
     toolTableCurrent = tooldata_entry_init();
-#endif //}
+#endif
 }
 
 EMC_AUX_STAT::EMC_AUX_STAT():
@@ -202,7 +202,7 @@ EMC_TOOL_STAT EMC_TOOL_STAT::operator =(EMC_TOOL_STAT s)
     toolInSpindle = s.toolInSpindle; // toolno
     toolFromPocket = s.toolFromPocket; // tool_from_pocket
 
-#ifdef TOOL_NML //{
+#ifdef TOOL_NML
     int idx;
     for (idx = 0; idx < CANON_POCKETS_MAX; idx++) {
         toolTable[idx].toolno = s.toolTable[idx].toolno;
@@ -213,13 +213,13 @@ EMC_TOOL_STAT EMC_TOOL_STAT::operator =(EMC_TOOL_STAT s)
         toolTable[idx].backangle = s.toolTable[idx].backangle;
         toolTable[idx].orientation = s.toolTable[idx].orientation;
     }
-#else //}{
+#else
     struct CANON_TOOL_TABLE tdata;
     if (tooldata_get(&tdata,0) != IDX_OK) {
         fprintf(stderr,"UNEXPECTED idx %s %d\n",__FILE__,__LINE__);
     }
     toolTableCurrent = tdata;
-#endif //}
+#endif
 
     return s;
 }

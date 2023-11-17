@@ -82,21 +82,21 @@ int main(int argc, char **argv) {
         fprintf(stderr, DATA_FMT
                , emcStatus->io.tool.pocketPrepped // idx
                , emcStatus->io.tool.toolInSpindle // toolno
-#ifdef TOOL_NML //{
+#ifdef TOOL_NML
                , emcStatus->io.tool.toolTable[0].toolno
                , emcStatus->io.tool.toolTable[0].pocketno
                , emcStatus->io.tool.toolTable[0].diameter
                , emcStatus->io.tool.toolTable[0].offset.tran.x
                , emcStatus->io.tool.toolTable[0].offset.tran.y
                , emcStatus->io.tool.toolTable[0].offset.tran.z
-#else //}{
+#else
                , emcStatus->io.tool.toolTableCurrent.toolno
                , emcStatus->io.tool.toolTableCurrent.pocketno
                , emcStatus->io.tool.toolTableCurrent.diameter
                , emcStatus->io.tool.toolTableCurrent.offset.tran.x
                , emcStatus->io.tool.toolTableCurrent.offset.tran.y
                , emcStatus->io.tool.toolTableCurrent.offset.tran.z
-#endif //}
+#endif
         );
         usleep(1000*1000);
         if (++hdr_ct % HDR_INTERVAL == 0) {header();}
