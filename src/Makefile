@@ -1003,6 +1003,12 @@ hal_pi_gpio-objs := 				\
     hal/drivers/hal_pi_gpio.o 		\
     hal/drivers/cpuinfo.o 		\
     $(MATHSTUB)
+ifdef HAVE_PIGPIO
+obj-$(CONFIG_HAL_PIGPIO) += hal_pigpio.o
+hal_pigpio-objs := 			\
+    hal/drivers/hal_pigpio.o		\
+    $(MATHSTUB)
+endif
 ifdef LIBGPIOD_VER
 obj-$(CONFIG_HAL_GPIO) += hal_gpio.o
 hal_gpio-objs  :=			\
@@ -1343,6 +1349,9 @@ endif
 ../rtlib/hm2_rpspi$(MODULE_EXT): $(addprefix objects/rt,$(hm2_rpspi-objs))
 ../rtlib/hal_bb_gpio$(MODULE_EXT): $(addprefix objects/rt,$(hal_bb_gpio-objs))
 ../rtlib/hal_pi_gpio$(MODULE_EXT): $(addprefix objects/rt,$(hal_pi_gpio-objs))
+ifdef HAVE_PIGPIO
+../rtlib/hal_pigpio$(MODULE_EXT): $(addprefix objects/rt,$(hal_pigpio-objs))
+endif
 ifdef LIBGPIOD_VER
 ../rtlib/hal_gpio$(MODULE_EXT): $(addprefix objects/rt,$(hal_gpio-objs))
 endif

@@ -542,6 +542,26 @@ AC_CHECK_LIB(gpiod, main,
             AC_SUBST([LIBGPIOD_VER], `pkg-config libgpiod --modversion | awk -F. '{print ($1 * 100)+($2) }'`)],
             [AC_MSG_WARN([Could not find libgpiod, not building hal_gpio])])
 
+
+
+#
+# check for libpigpio
+#
+AC_CHECK_LIB(pigpiod_if2, pigpio_start,
+    [
+        AC_DEFINE(
+            [HAVE_PIGPIO],
+            [yes],
+            [define if pigpio library is available]
+        )
+        LDFLAGS="$LDFLAGS -lpigpiod_if2"
+        AC_SUBST(HAVE_PIGPIO, yes)
+    ],
+    [AC_MSG_WARN([Could not find pigpio, not building hal_pigpio])],
+    [-lpthread -lrt])
+
+
+
 ##############################################################################
 # Subsection 3.2 - check for the kernel version, with RT patches             #
 #----------------------------------------------------------------------------#
